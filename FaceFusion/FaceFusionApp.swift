@@ -5,13 +5,52 @@
 //  Created by Vikram Kumar on 20/04/26.
 //
 
+//import SwiftUI
+//
+//@main
+//struct FaceFusionApp: App {
+//    var body: some Scene {
+//        WindowGroup {
+//            ContentView()
+//        }
+//    }
+//}
+
+
 import SwiftUI
+import Firebase
 
 @main
-struct FaceFusionApp: App {
+struct AIStylerApp: App {
+
+    @StateObject private var authViewModel = AuthViewModel()
+
+    init() {
+        FirebaseApp.configure()
+    }
+
     var body: some Scene {
         WindowGroup {
-            ContentView()
+            RootView()
+                .environmentObject(authViewModel)
         }
+    }
+}
+
+// MARK: - Root View (decides Login or Main App)
+struct RootView: View {
+    @EnvironmentObject var authViewModel: AuthViewModel
+
+    var body: some View {
+        Group {
+            if authViewModel.isLoggedIn {
+                ContentView()
+                    .environmentObject(authViewModel)
+            } else {
+                LoginView()
+                    .environmentObject(authViewModel)
+            }
+        }
+        .animation(.easeInOut, value: authViewModel.isLoggedIn)
     }
 }
