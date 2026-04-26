@@ -810,7 +810,75 @@ struct ProfileTabView: View {
     }
 }
 
+struct StatBlock: View {
+    let value: String
+    let label: String
 
+    var body: some View {
+        VStack(spacing: 4) {
+            Text(value).font(.title2).fontWeight(.bold)
+            Text(label).font(.caption).foregroundColor(.secondary)
+        }
+        .frame(maxWidth: .infinity)
+        .padding(.vertical, 14)
+    }
+}
+
+struct SectionHeader: View {
+    let title: String
+    var body: some View {
+        Text(title)
+            .font(.caption).fontWeight(.semibold)
+            .foregroundColor(.secondary)
+            .textCase(.uppercase)
+            .padding(.horizontal, 16)
+            .padding(.top, 14)
+            .padding(.bottom, 8)
+    }
+}
+
+struct SettingsToggleRow: View {
+    let icon: String
+    let iconColor: Color
+    let label: String
+    @Binding var isOn: Bool
+
+    var body: some View {
+        HStack(spacing: 14) {
+            ZStack {
+                RoundedRectangle(cornerRadius: 8).fill(iconColor)
+                    .frame(width: 32, height: 32)
+                Image(systemName: icon).font(.system(size: 14)).foregroundColor(.white)
+            }
+            Text(label).font(.body)
+            Spacer()
+            Toggle("", isOn: $isOn).labelsHidden()
+        }
+        .padding(.horizontal, 16)
+        .padding(.vertical, 12)
+    }
+}
+
+struct SettingsNavRow: View {
+    let icon: String
+    let iconColor: Color
+    let label: String
+
+    var body: some View {
+        HStack(spacing: 14) {
+            ZStack {
+                RoundedRectangle(cornerRadius: 8).fill(iconColor)
+                    .frame(width: 32, height: 32)
+                Image(systemName: icon).font(.system(size: 14)).foregroundColor(.white)
+            }
+            Text(label).font(.body)
+            Spacer()
+            Image(systemName: "chevron.right").font(.caption).foregroundColor(Color(.systemGray3))
+        }
+        .padding(.horizontal, 16)
+        .padding(.vertical, 14)
+    }
+}
 
 #Preview {
     ContentView()
