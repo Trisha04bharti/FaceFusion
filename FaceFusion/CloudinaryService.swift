@@ -11,8 +11,8 @@ import Foundation
 class CloudinaryService {
 
     // ⚠️ Replace these with your actual Cloudinary credentials
-    static let cloudName = "YOUR_CLOUD_NAME"
-    static let uploadPreset = "YOUR_UPLOAD_PRESET"  // Must be set to UNSIGNED in Cloudinary dashboard
+    static let cloudName = "djp2jaxxh"
+    static let uploadPreset = "facefusion_upload"  // Must be set to UNSIGNED in Cloudinary dashboard
 
     // MARK: - Upload UIImage to Cloudinary, returns secure URL
     static func uploadImage(_ image: UIImage, completion: @escaping (Result<String, Error>) -> Void) {

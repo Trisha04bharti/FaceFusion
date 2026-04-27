@@ -1,6 +1,5 @@
 import SwiftUI
 import PhotosUI
-import Combine
 
 // MARK: - Models
 
@@ -10,7 +9,7 @@ struct Template: Identifiable {
 }
 
 struct GeneratedImage: Identifiable {
-    let id = UUID()
+    let id: UUID
     let outputURL: String
     let templateURL: String
     let date: Date
@@ -22,20 +21,10 @@ enum AppScreen {
     case result(outputURL: String, templateURL: String)
 }
 
-// MARK: - App Storage (shared state)
-
-class AppStore: ObservableObject {
-    @Published var generatedImages: [GeneratedImage] = []
-
-    func addImage(outputURL: String, templateURL: String) {
-        let img = GeneratedImage(outputURL: outputURL, templateURL: templateURL, date: Date())
-        generatedImages.insert(img, at: 0)
-    }
-}
-
-// MARK: - Root View with Custom Tab Bar
+// MARK: - Root Content View
 
 struct ContentView: View {
+    @EnvironmentObject var authViewModel: AuthViewModel
     @StateObject private var store = AppStore()
     @State private var selectedTab: Int = 0
 
@@ -44,11 +33,10 @@ struct ContentView: View {
             TabView(selection: $selectedTab) {
                 HomeTabView(store: store)
                     .tag(0)
-
                 ImagesTabView(store: store)
                     .tag(1)
-
                 ProfileTabView()
+                    .environmentObject(authViewModel)
                     .tag(2)
             }
             .tabViewStyle(.page(indexDisplayMode: .never))
@@ -57,6 +45,9 @@ struct ContentView: View {
             CustomTabBar(selectedTab: $selectedTab)
         }
         .ignoresSafeArea(edges: .bottom)
+        .onAppear {
+            store.loadImages()
+        }
     }
 }
 
@@ -76,20 +67,13 @@ struct CustomTabBar: View {
         .padding(.bottom, 28)
         .background(
             ZStack {
-                // Frosted glass effect
                 Color(.systemBackground).opacity(0.92)
-                Rectangle()
-                    .fill(.ultraThinMaterial)
+                Rectangle().fill(.ultraThinMaterial)
             }
             .shadow(color: .black.opacity(0.1), radius: 20, x: 0, y: -4)
             .ignoresSafeArea(edges: .bottom)
         )
-        .overlay(
-            Rectangle()
-                .frame(height: 0.5)
-                .foregroundColor(Color(.separator)),
-            alignment: .top
-        )
+        .overlay(Rectangle().frame(height: 0.5).foregroundColor(Color(.separator)), alignment: .top)
     }
 }
 
@@ -98,14 +82,11 @@ struct TabBarItem: View {
     let label: String
     let index: Int
     @Binding var selectedTab: Int
-
     var isSelected: Bool { selectedTab == index }
 
     var body: some View {
         Button(action: {
-            withAnimation(.spring(response: 0.3, dampingFraction: 0.7)) {
-                selectedTab = index
-            }
+            withAnimation(.spring(response: 0.3, dampingFraction: 0.7)) { selectedTab = index }
         }) {
             VStack(spacing: 5) {
                 ZStack {
@@ -141,8 +122,7 @@ struct HomeTabView: View {
     @State private var pendingTemplate: Template? = nil
     @State private var showCamera = false
     @State private var showGallery = false
-
-    let dummyOutputURL = "https://res.cloudinary.com/djp2jaxxh/image/upload/v1777121952/karina-tess-l35dDPD3Gys-unsplash_1_wtqmp2.jpg"
+    @State private var uploadError: String? = nil
 
     let templates: [Template] = [
         Template(url: "https://res.cloudinary.com/djp2jaxxh/image/upload/v1777121966/wasis-riyan-1ev_2PFcS_U-unsplash_texbhm.jpg"),
@@ -163,30 +143,24 @@ struct HomeTabView: View {
         ZStack {
             switch screen {
             case .home:
-                HomeScreen(
-                    templates: templates,
-                    onTemplateTapped: { template in
-                        pendingTemplate = template
-                        showSourcePicker = true
-                    }
-                )
+                HomeScreen(templates: templates, onTemplateTapped: { template in
+                    pendingTemplate = template
+                    showSourcePicker = true
+                })
 
             case .confirmSelection(let userImg, let tmpl):
                 ConfirmView(
                     userImage: userImg,
                     template: tmpl,
                     isLoading: $isLoadingResult,
+                    errorMessage: $uploadError,
                     onSubmit: {
-                        isLoadingResult = true
-                        DispatchQueue.main.asyncAfter(deadline: .now() + 2) {
-                            isLoadingResult = false
-                            store.addImage(outputURL: dummyOutputURL, templateURL: tmpl.url)
-                            screen = .result(outputURL: dummyOutputURL, templateURL: tmpl.url)
-                        }
+                        handleSubmit(userImg: userImg, tmpl: tmpl)
                     },
                     onCancel: {
                         userImage = nil
                         photosItem = nil
+                        uploadError = nil
                         screen = .home
                     },
                     onChangePhoto: {
@@ -198,31 +172,24 @@ struct HomeTabView: View {
                     }
                 )
 
-            case .result(let outputURL, _):
-                ResultView(
-                    outputURL: outputURL,
-                    onBack: {
-                        userImage = nil
-                        photosItem = nil
-                        screen = .home
-                    }
-                )
+            case .result(let outputURL, let templateURL):
+                ResultView(outputURL: outputURL, onBack: {
+                    userImage = nil
+                    photosItem = nil
+                    uploadError = nil
+                    screen = .home
+                })
             }
 
-            // Source picker overlay
             if showSourcePicker {
                 SourcePickerOverlay(
                     onGallery: {
                         showSourcePicker = false
-                        DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
-                            showGallery = true
-                        }
+                        DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) { showGallery = true }
                     },
                     onCamera: {
                         showSourcePicker = false
-                        DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
-                            showCamera = true
-                        }
+                        DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) { showCamera = true }
                     },
                     onDismiss: {
                         showSourcePicker = false
@@ -257,6 +224,35 @@ struct HomeTabView: View {
             }
         }
     }
+
+    // MARK: - Submit: Upload to Cloudinary then call AI API
+    func handleSubmit(userImg: UIImage, tmpl: Template) {
+        isLoadingResult = true
+        uploadError = nil
+
+        // Step 1: Upload user image to Cloudinary
+        CloudinaryService.uploadImage(userImg) { result in
+            switch result {
+            case .failure(let error):
+                DispatchQueue.main.async {
+                    isLoadingResult = false
+                    uploadError = error.localizedDescription
+                }
+
+            case .success(let uploadedUserImageURL):
+                // ⚡ Step 2: Here you would call Gemini / AI API
+                // using uploadedUserImageURL + tmpl.url
+                // For now we use a dummy output URL
+                let dummyOutputURL = "https://res.cloudinary.com/djp2jaxxh/image/upload/v1777121952/karina-tess-l35dDPD3Gys-unsplash_1_wtqmp2.jpg"
+
+                DispatchQueue.main.async {
+                    isLoadingResult = false
+                    store.addImage(outputURL: dummyOutputURL, templateURL: tmpl.url)
+                    screen = .result(outputURL: dummyOutputURL, templateURL: tmpl.url)
+                }
+            }
+        }
+    }
 }
 
 // MARK: - Home Screen
@@ -270,34 +266,23 @@ struct HomeScreen: View {
         NavigationView {
             ScrollView {
                 VStack(alignment: .leading, spacing: 16) {
-
-                    // Banner
                     ZStack(alignment: .leading) {
-                        LinearGradient(
-                            colors: [Color.blue.opacity(0.8), Color.purple.opacity(0.7)],
-                            startPoint: .topLeading,
-                            endPoint: .bottomTrailing
-                        )
+                        LinearGradient(colors: [.blue.opacity(0.8), .purple.opacity(0.7)],
+                                       startPoint: .topLeading, endPoint: .bottomTrailing)
                         .cornerRadius(18)
-
                         VStack(alignment: .leading, spacing: 6) {
                             Text("Transform Yourself")
-                                .font(.title2)
-                                .fontWeight(.bold)
-                                .foregroundColor(.white)
+                                .font(.title2).fontWeight(.bold).foregroundColor(.white)
                             Text("Pick a template and let AI do the magic")
-                                .font(.subheadline)
-                                .foregroundColor(.white.opacity(0.85))
+                                .font(.subheadline).foregroundColor(.white.opacity(0.85))
                         }
                         .padding(20)
                     }
                     .frame(height: 100)
-                    .padding(.horizontal)
-                    .padding(.top, 4)
+                    .padding(.horizontal).padding(.top, 4)
 
                     Text("Choose a Template")
-                        .font(.headline)
-                        .padding(.horizontal)
+                        .font(.headline).padding(.horizontal)
 
                     LazyVGrid(columns: columns, spacing: 12) {
                         ForEach(templates) { template in
@@ -305,7 +290,7 @@ struct HomeScreen: View {
                         }
                     }
                     .padding(.horizontal)
-                    .padding(.bottom, 100) // space for tab bar
+                    .padding(.bottom, 100)
                 }
                 .padding(.top, 12)
             }
@@ -325,19 +310,13 @@ struct TemplateCell: View {
         Button(action: onTap) {
             AsyncImage(url: URL(string: template.url)) { phase in
                 switch phase {
-                case .empty:
-                    ZStack { Color(.systemGray5); ProgressView() }
-                case .success(let image):
-                    image.resizable().scaledToFill()
-                case .failure:
-                    ZStack { Color(.systemGray5); Image(systemName: "photo").foregroundColor(.secondary) }
-                @unknown default:
-                    EmptyView()
+                case .empty: ZStack { Color(.systemGray5); ProgressView() }
+                case .success(let image): image.resizable().scaledToFill()
+                case .failure: ZStack { Color(.systemGray5); Image(systemName: "photo").foregroundColor(.secondary) }
+                @unknown default: EmptyView()
                 }
             }
-            .frame(height: 140)
-            .clipped()
-            .cornerRadius(14)
+            .frame(height: 140).clipped().cornerRadius(14)
             .shadow(color: .black.opacity(0.12), radius: 5, x: 0, y: 2)
         }
         .buttonStyle(.plain)
@@ -353,21 +332,15 @@ struct SourcePickerOverlay: View {
 
     var body: some View {
         ZStack {
-            Color.black.opacity(0.5)
-                .ignoresSafeArea()
-                .onTapGesture { onDismiss() }
+            Color.black.opacity(0.5).ignoresSafeArea().onTapGesture { onDismiss() }
 
             VStack(spacing: 0) {
                 VStack(spacing: 6) {
                     Image(systemName: "person.crop.circle.badge.plus")
-                        .font(.system(size: 36))
-                        .foregroundColor(.blue)
-                        .padding(.bottom, 4)
-                    Text("Upload Your Photo")
-                        .font(.title3).fontWeight(.bold)
+                        .font(.system(size: 36)).foregroundColor(.blue).padding(.bottom, 4)
+                    Text("Upload Your Photo").font(.title3).fontWeight(.bold)
                     Text("Choose how you'd like to add your photo")
-                        .font(.caption).foregroundColor(.secondary)
-                        .multilineTextAlignment(.center)
+                        .font(.caption).foregroundColor(.secondary).multilineTextAlignment(.center)
                 }
                 .padding(.top, 28).padding(.horizontal, 24).padding(.bottom, 24)
 
@@ -376,8 +349,7 @@ struct SourcePickerOverlay: View {
                 Button(action: onGallery) {
                     HStack(spacing: 16) {
                         ZStack {
-                            RoundedRectangle(cornerRadius: 10).fill(Color.blue.opacity(0.12))
-                                .frame(width: 46, height: 46)
+                            RoundedRectangle(cornerRadius: 10).fill(Color.blue.opacity(0.12)).frame(width: 46, height: 46)
                             Image(systemName: "photo.on.rectangle").font(.system(size: 20)).foregroundColor(.blue)
                         }
                         VStack(alignment: .leading, spacing: 3) {
@@ -396,8 +368,7 @@ struct SourcePickerOverlay: View {
                 Button(action: onCamera) {
                     HStack(spacing: 16) {
                         ZStack {
-                            RoundedRectangle(cornerRadius: 10).fill(Color.purple.opacity(0.12))
-                                .frame(width: 46, height: 46)
+                            RoundedRectangle(cornerRadius: 10).fill(Color.purple.opacity(0.12)).frame(width: 46, height: 46)
                             Image(systemName: "camera.fill").font(.system(size: 20)).foregroundColor(.purple)
                         }
                         VStack(alignment: .leading, spacing: 3) {
@@ -433,6 +404,7 @@ struct ConfirmView: View {
     let userImage: UIImage
     let template: Template
     @Binding var isLoading: Bool
+    @Binding var errorMessage: String?
     let onSubmit: () -> Void
     let onCancel: () -> Void
     let onChangePhoto: () -> Void
@@ -444,15 +416,12 @@ struct ConfirmView: View {
                     VStack(spacing: 24) {
                         Text("Looking good! Ready to transform?")
                             .font(.subheadline).foregroundColor(.secondary)
-                            .multilineTextAlignment(.center)
                             .padding(.horizontal).padding(.top, 20)
 
                         HStack(spacing: 12) {
                             VStack(spacing: 8) {
-                                Text("Your Photo")
-                                    .font(.caption).fontWeight(.semibold).foregroundColor(.secondary)
-                                Image(uiImage: userImage)
-                                    .resizable().scaledToFill()
+                                Text("Your Photo").font(.caption).fontWeight(.semibold).foregroundColor(.secondary)
+                                Image(uiImage: userImage).resizable().scaledToFill()
                                     .frame(width: 155, height: 220).clipped().cornerRadius(16)
                                     .shadow(color: .black.opacity(0.15), radius: 8, x: 0, y: 4)
                             }
@@ -463,8 +432,7 @@ struct ConfirmView: View {
                             }
                             .frame(height: 220)
                             VStack(spacing: 8) {
-                                Text("Template")
-                                    .font(.caption).fontWeight(.semibold).foregroundColor(.secondary)
+                                Text("Template").font(.caption).fontWeight(.semibold).foregroundColor(.secondary)
                                 AsyncImage(url: URL(string: template.url)) { phase in
                                     switch phase {
                                     case .success(let image): image.resizable().scaledToFill()
@@ -478,13 +446,20 @@ struct ConfirmView: View {
                         }
                         .padding(.horizontal)
 
+                        if let error = errorMessage {
+                            HStack {
+                                Image(systemName: "exclamationmark.circle.fill").foregroundColor(.red)
+                                Text(error).font(.caption).foregroundColor(.red)
+                            }
+                            .padding(.horizontal)
+                        }
+
                         HStack(spacing: 10) {
                             Image(systemName: "sparkles").foregroundColor(.purple)
                             Text("AI will place your face onto the template's outfit and pose")
                                 .font(.caption).foregroundColor(.secondary)
                         }
-                        .padding().background(Color(.systemGray6)).cornerRadius(12)
-                        .padding(.horizontal)
+                        .padding().background(Color(.systemGray6)).cornerRadius(12).padding(.horizontal)
 
                         Button(action: onChangePhoto) {
                             Label("Change Photo", systemImage: "arrow.triangle.2.circlepath")
@@ -506,7 +481,7 @@ struct ConfirmView: View {
                             HStack(spacing: 8) {
                                 if isLoading { ProgressView().tint(.white).scaleEffect(0.85) }
                                 else { Image(systemName: "sparkles") }
-                                Text(isLoading ? "Generating..." : "Generate").fontWeight(.semibold)
+                                Text(isLoading ? "Uploading..." : "Generate").fontWeight(.semibold)
                             }
                             .foregroundColor(.white).frame(maxWidth: .infinity).padding(.vertical, 16)
                             .background(isLoading ? Color.gray : Color.blue).cornerRadius(14)
@@ -603,17 +578,17 @@ struct ImagesTabView: View {
     var body: some View {
         NavigationView {
             Group {
-                if store.generatedImages.isEmpty {
+                if store.isLoadingImages {
+                    ProgressView("Loading your images...")
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                } else if store.generatedImages.isEmpty {
                     VStack(spacing: 16) {
                         Image(systemName: "photo.stack")
-                            .font(.system(size: 60))
-                            .foregroundColor(Color(.systemGray3))
-                        Text("No images yet")
-                            .font(.title3).fontWeight(.semibold)
+                            .font(.system(size: 60)).foregroundColor(Color(.systemGray3))
+                        Text("No images yet").font(.title3).fontWeight(.semibold)
                         Text("Generate your first AI image from the Home tab")
                             .font(.subheadline).foregroundColor(.secondary)
-                            .multilineTextAlignment(.center)
-                            .padding(.horizontal, 40)
+                            .multilineTextAlignment(.center).padding(.horizontal, 40)
                     }
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
                 } else {
@@ -623,14 +598,19 @@ struct ImagesTabView: View {
                                 GeneratedImageCell(item: item)
                             }
                         }
-                        .padding(.horizontal)
-                        .padding(.top, 12)
-                        .padding(.bottom, 100)
+                        .padding(.horizontal).padding(.top, 12).padding(.bottom, 100)
                     }
                 }
             }
             .navigationTitle("My Images")
             .navigationBarTitleDisplayMode(.large)
+            .toolbar {
+                ToolbarItem(placement: .navigationBarTrailing) {
+                    Button(action: { store.loadImages() }) {
+                        Image(systemName: "arrow.clockwise")
+                    }
+                }
+            }
         }
     }
 }
@@ -644,26 +624,18 @@ struct GeneratedImageCell: View {
             VStack(spacing: 0) {
                 AsyncImage(url: URL(string: item.outputURL)) { phase in
                     switch phase {
-                    case .success(let image):
-                        image.resizable().scaledToFill()
-                    case .empty:
-                        ZStack { Color(.systemGray5); ProgressView() }
-                    default:
-                        Color(.systemGray5)
+                    case .success(let image): image.resizable().scaledToFill()
+                    case .empty: ZStack { Color(.systemGray5); ProgressView() }
+                    default: Color(.systemGray5)
                     }
                 }
-                .frame(height: 200)
-                .clipped()
+                .frame(height: 200).clipped()
 
-                // Date footer
                 HStack {
-                    Text(item.date, style: .date)
-                        .font(.caption2)
-                        .foregroundColor(.secondary)
+                    Text(item.date, style: .date).font(.caption2).foregroundColor(.secondary)
                     Spacer()
                 }
-                .padding(.horizontal, 10)
-                .padding(.vertical, 8)
+                .padding(.horizontal, 10).padding(.vertical, 8)
                 .background(Color(.systemBackground))
             }
             .cornerRadius(14)
@@ -683,26 +655,18 @@ struct ImageFullScreenView: View {
     var body: some View {
         ZStack(alignment: .topTrailing) {
             Color.black.ignoresSafeArea()
-
             AsyncImage(url: URL(string: imageURL)) { phase in
                 switch phase {
-                case .success(let image):
-                    image.resizable().scaledToFit().ignoresSafeArea()
-                case .empty:
-                    ProgressView().tint(.white)
-                default:
-                    Image(systemName: "photo").foregroundColor(.white).font(.largeTitle)
+                case .success(let image): image.resizable().scaledToFit().ignoresSafeArea()
+                case .empty: ProgressView().tint(.white)
+                default: Image(systemName: "photo").foregroundColor(.white).font(.largeTitle)
                 }
             }
-
             Button(action: onDismiss) {
                 Image(systemName: "xmark.circle.fill")
-                    .font(.system(size: 30))
-                    .foregroundColor(.white)
-                    .shadow(radius: 4)
+                    .font(.system(size: 30)).foregroundColor(.white).shadow(radius: 4)
             }
-            .padding(20)
-            .padding(.top, 40)
+            .padding(20).padding(.top, 40)
         }
     }
 }
@@ -710,94 +674,58 @@ struct ImageFullScreenView: View {
 // MARK: - PROFILE TAB
 
 struct ProfileTabView: View {
+    @EnvironmentObject var authViewModel: AuthViewModel
     @State private var notificationsOn = true
     @State private var saveToPhotos = false
+    @State private var showLogoutAlert = false
 
     var body: some View {
         NavigationView {
             ScrollView {
                 VStack(spacing: 24) {
 
-                    // Avatar + Name
+                    // Avatar
                     VStack(spacing: 12) {
                         ZStack {
                             Circle()
-                                .fill(
-                                    LinearGradient(
-                                        colors: [Color.blue, Color.purple],
-                                        startPoint: .topLeading,
-                                        endPoint: .bottomTrailing
-                                    )
-                                )
+                                .fill(LinearGradient(colors: [.blue, .purple],
+                                                     startPoint: .topLeading, endPoint: .bottomTrailing))
                                 .frame(width: 90, height: 90)
-                            Text("V")
-                                .font(.system(size: 36, weight: .bold))
-                                .foregroundColor(.white)
+                            Text(String(authViewModel.currentUser?.username.prefix(1).uppercased() ?? "U"))
+                                .font(.system(size: 36, weight: .bold)).foregroundColor(.white)
                         }
-                        Text("Vikram Kumar")
+                        Text(authViewModel.currentUser?.username ?? "User")
                             .font(.title2).fontWeight(.bold)
-                        Text("vikram@example.com")
+                        Text(authViewModel.currentUser?.email ?? "")
                             .font(.subheadline).foregroundColor(.secondary)
                     }
                     .padding(.top, 20)
 
-                    // Stats row
-                    HStack(spacing: 0) {
-                        StatBlock(value: "12", label: "Generated")
-                        Divider().frame(height: 40)
-                        StatBlock(value: "3", label: "Templates Used")
-                        Divider().frame(height: 40)
-                        StatBlock(value: "5", label: "Saved")
-                    }
-                    .background(Color(.systemGray6))
-                    .cornerRadius(16)
-                    .padding(.horizontal)
-
-                    // Settings Section
+                    // Settings
                     VStack(alignment: .leading, spacing: 0) {
                         SectionHeader(title: "Preferences")
-
-                        SettingsToggleRow(
-                            icon: "bell.fill",
-                            iconColor: .orange,
-                            label: "Notifications",
-                            isOn: $notificationsOn
-                        )
+                        SettingsToggleRow(icon: "bell.fill", iconColor: .orange, label: "Notifications", isOn: $notificationsOn)
                         Divider().padding(.leading, 56)
-                        SettingsToggleRow(
-                            icon: "arrow.down.circle.fill",
-                            iconColor: .green,
-                            label: "Auto-save to Photos",
-                            isOn: $saveToPhotos
-                        )
+                        SettingsToggleRow(icon: "arrow.down.circle.fill", iconColor: .green, label: "Auto-save to Photos", isOn: $saveToPhotos)
                     }
-                    .background(Color(.systemGray6))
-                    .cornerRadius(16)
-                    .padding(.horizontal)
+                    .background(Color(.systemGray6)).cornerRadius(16).padding(.horizontal)
 
-                    // Account Section
                     VStack(alignment: .leading, spacing: 0) {
                         SectionHeader(title: "Account")
-
                         SettingsNavRow(icon: "person.fill", iconColor: .blue, label: "Edit Profile")
                         Divider().padding(.leading, 56)
                         SettingsNavRow(icon: "lock.fill", iconColor: .gray, label: "Privacy & Security")
                         Divider().padding(.leading, 56)
                         SettingsNavRow(icon: "questionmark.circle.fill", iconColor: .teal, label: "Help & Support")
                     }
-                    .background(Color(.systemGray6))
-                    .cornerRadius(16)
-                    .padding(.horizontal)
+                    .background(Color(.systemGray6)).cornerRadius(16).padding(.horizontal)
 
-                    // Sign out
-                    Button(action: {}) {
+                    // Logout
+                    Button(action: { showLogoutAlert = true }) {
                         Text("Sign Out")
-                            .fontWeight(.medium)
-                            .foregroundColor(.red)
-                            .frame(maxWidth: .infinity)
-                            .padding(.vertical, 16)
-                            .background(Color(.systemGray6))
-                            .cornerRadius(16)
+                            .fontWeight(.medium).foregroundColor(.red)
+                            .frame(maxWidth: .infinity).padding(.vertical, 16)
+                            .background(Color(.systemGray6)).cornerRadius(16)
                     }
                     .padding(.horizontal)
 
@@ -806,6 +734,12 @@ struct ProfileTabView: View {
             }
             .navigationTitle("Profile")
             .navigationBarTitleDisplayMode(.large)
+            .alert("Sign Out", isPresented: $showLogoutAlert) {
+                Button("Cancel", role: .cancel) {}
+                Button("Sign Out", role: .destructive) { authViewModel.logout() }
+            } message: {
+                Text("Are you sure you want to sign out?")
+            }
         }
     }
 }
@@ -813,27 +747,20 @@ struct ProfileTabView: View {
 struct StatBlock: View {
     let value: String
     let label: String
-
     var body: some View {
         VStack(spacing: 4) {
             Text(value).font(.title2).fontWeight(.bold)
             Text(label).font(.caption).foregroundColor(.secondary)
         }
-        .frame(maxWidth: .infinity)
-        .padding(.vertical, 14)
+        .frame(maxWidth: .infinity).padding(.vertical, 14)
     }
 }
 
 struct SectionHeader: View {
     let title: String
     var body: some View {
-        Text(title)
-            .font(.caption).fontWeight(.semibold)
-            .foregroundColor(.secondary)
-            .textCase(.uppercase)
-            .padding(.horizontal, 16)
-            .padding(.top, 14)
-            .padding(.bottom, 8)
+        Text(title).font(.caption).fontWeight(.semibold).foregroundColor(.secondary)
+            .textCase(.uppercase).padding(.horizontal, 16).padding(.top, 14).padding(.bottom, 8)
     }
 }
 
@@ -842,20 +769,17 @@ struct SettingsToggleRow: View {
     let iconColor: Color
     let label: String
     @Binding var isOn: Bool
-
     var body: some View {
         HStack(spacing: 14) {
             ZStack {
-                RoundedRectangle(cornerRadius: 8).fill(iconColor)
-                    .frame(width: 32, height: 32)
+                RoundedRectangle(cornerRadius: 8).fill(iconColor).frame(width: 32, height: 32)
                 Image(systemName: icon).font(.system(size: 14)).foregroundColor(.white)
             }
             Text(label).font(.body)
             Spacer()
             Toggle("", isOn: $isOn).labelsHidden()
         }
-        .padding(.horizontal, 16)
-        .padding(.vertical, 12)
+        .padding(.horizontal, 16).padding(.vertical, 12)
     }
 }
 
@@ -863,23 +787,20 @@ struct SettingsNavRow: View {
     let icon: String
     let iconColor: Color
     let label: String
-
     var body: some View {
         HStack(spacing: 14) {
             ZStack {
-                RoundedRectangle(cornerRadius: 8).fill(iconColor)
-                    .frame(width: 32, height: 32)
+                RoundedRectangle(cornerRadius: 8).fill(iconColor).frame(width: 32, height: 32)
                 Image(systemName: icon).font(.system(size: 14)).foregroundColor(.white)
             }
             Text(label).font(.body)
             Spacer()
             Image(systemName: "chevron.right").font(.caption).foregroundColor(Color(.systemGray3))
         }
-        .padding(.horizontal, 16)
-        .padding(.vertical, 14)
+        .padding(.horizontal, 16).padding(.vertical, 14)
     }
 }
 
 #Preview {
-    ContentView()
+    ContentView().environmentObject(AuthViewModel())
 }

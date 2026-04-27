@@ -24,6 +24,7 @@ import Firebase
 struct AIStylerApp: App {
 
     @StateObject private var authViewModel = AuthViewModel()
+    @StateObject private var auth2 = AuthViewModel()
 
     init() {
         FirebaseApp.configure()

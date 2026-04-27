@@ -16,10 +16,12 @@ class AuthViewModel: ObservableObject {
     @Published var currentUser: UserModel? = nil
     @Published var isLoading: Bool = false
     @Published var errorMessage: String? = nil
+    
+    static let shared = AuthViewModel()
 
     private var authStateHandle: AuthStateDidChangeListenerHandle?
 
-    init() {
+    private init() {
         listenToAuthState()
     }
 
